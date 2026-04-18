@@ -8,7 +8,7 @@ import { RouteCard } from './RouteCard';
 import { LiveMap } from './LiveMap';
 import { HUBS } from '../data/logisticsData';
 import type { ShipmentParams } from '../engine/RiskModeler';
-import type { Scenario } from '../engine/RouteOptimizer';
+import type { Scenario, RouteSegment } from '../engine/RouteOptimizer';
 import { ChevronDown, Map as MapIcon, X, Maximize2, ShieldAlert, Zap, Filter, Handshake, Activity, Wind, Globe, ShieldCheck } from 'lucide-react';
 import { ContractConfigPanel } from './ContractConfigPanel';
 
@@ -18,9 +18,9 @@ import axios from 'axios';
 import { RiskAlertsView } from './RiskAlertsView';
 import { CostBreakdownView } from './CostBreakdownView';
 import { OverviewView } from './OverviewView';
+import { ShapExplainabilityView } from './ShapExplainabilityView';
 import { useCurrency } from '../hooks/useCurrency';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ShapExplainabilityView } from './ShapExplainabilityView';
 import '../dashboard-layout.css';
 
 const getScenarioIcon = (id: string) => {
@@ -58,6 +58,19 @@ export const Dashboard: React.FC = () => {
     destHub: HUBS.find(h => h.city === 'Los Angeles') || HUBS[1],
     deliveryDeadline: new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString().split('T')[0]
   });
+
+  // Auto-resolve city names to Hub objects for coordinates
+  useEffect(() => {
+    const oHub = HUBS.find(h => h.city.toLowerCase() === params.originCity.toLowerCase());
+    const dHub = HUBS.find(h => h.city.toLowerCase() === params.destCity.toLowerCase());
+    
+    if (oHub && oHub !== params.originHub) {
+      setParams(prev => ({ ...prev, originHub: oHub }));
+    }
+    if (dHub && dHub !== params.destHub) {
+      setParams(prev => ({ ...prev, destHub: dHub }));
+    }
+  }, [params.originCity, params.destCity]);
 
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [filteredScenarios, setFilteredScenarios] = useState<Scenario[]>([]);
@@ -152,38 +165,40 @@ export const Dashboard: React.FC = () => {
                        : i === 2 ? 'lowest_risk' // Strategic 1
                        : 'balanced';             // Tactical Surface
         const bRoute = backendRoutes.find((r: any) => r.id === targetId) || backendRoutes[i];
-        const financialData = bRoute.financials || {};
         
+        // Build real segments from the backend display segments or itinerary
+        const segments: RouteSegment[] = (bRoute.displaySegments || []).map((seg: any) => ({
+          from: seg.originName || bRoute.originHub?.hub?.name || 'Origin',
+          to: seg.destName || bRoute.destHub?.hub?.name || 'Destination',
+          mode: seg.mode?.toUpperCase() || 'ROAD',
+          carrier: seg.carrier || { name: bRoute.carrierName || 'Global Logistics' },
+          duration: seg.durationHours || 0,
+          cost: seg.costImpact || 0,
+          breakdown: {
+            freight: seg.costImpact || 0,
+            manifest: {
+              freight: [`Segment Transport: ${seg.modeLabel || seg.mode}`]
+            }
+          }
+        }));
+
+        // If no segments found, create a fallback direct segment
+        if (segments.length === 0) {
+          segments.push({
+            from: bRoute.originHub?.hub?.name || params.originCity,
+            to: bRoute.destHub?.hub?.name || params.destCity,
+            mode: bRoute.modes?.[0]?.toUpperCase() || 'AIR',
+            carrier: { name: bRoute.carrierName || 'Global Logistics' },
+            duration: bRoute.totalTimeDays * 24
+          });
+        }
+
         let modality = scenario.modality;
         if (bRoute.modes) {
           if (bRoute.modes.length > 1) modality = 'MULTIMODAL';
           else if (bRoute.modes[0] === 'air') modality = 'AIR';
           else if (bRoute.modes[0] === 'sea') modality = 'OCEAN';
           else modality = 'ROAD';
-        }
-
-        const segments = [...scenario.segments];
-        if (segments[0] && bRoute.cost) {
-          segments[0] = {
-            ...segments[0],
-            carrier: { name: bRoute.carrierName || 'Global Logistic' } as any,
-            cost: bRoute.cost.total,
-            breakdown: {
-              ...segments[0].breakdown,
-              freight: bRoute.cost.freight,
-              fuel: bRoute.cost.fuel,
-              handling: (bRoute.cost.handling || 0) + (bRoute.cost.extraCostFromDisruptions || 0),
-              duties: bRoute.cost.customs || 0,
-              totalRange: [bRoute.totalCost * 0.98, bRoute.totalCost * 1.02],
-              manifest: {
-                ...segments[0].breakdown.manifest,
-                freight: [`Base Benchmark Rate: $${(bRoute.cost.freight || 0).toLocaleString()}`],
-                fuel: [`Market Fuel Surcharge: $${(bRoute.cost.fuel || 0).toLocaleString()}`],
-                handling: [`Ops & Risk Surcharge: $${((bRoute.cost.handling || 0) + (bRoute.cost.extraCostFromDisruptions || 0)).toLocaleString()}`],
-                duties: [`Est. Regional Customs: $${(bRoute.cost.customs || 0).toLocaleString()}`]
-              }
-            }
-          };
         }
 
         return {
@@ -204,6 +219,7 @@ export const Dashboard: React.FC = () => {
                  bRoute.id === 'balanced' ? 'Recommended' : 
                  bRoute.id === 'lowest_risk' ? 'Balanced' : null,
           isRecommended: bRoute.recommended,
+          itinerary: bRoute.itinerary,
           backendRoute: bRoute 
         };
       });

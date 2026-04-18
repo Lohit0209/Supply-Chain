@@ -528,6 +528,11 @@ function generateRoutes(input, disruptions = []) {
     const firstInterruption = interruptedSegments[0];
     if (firstInterruption) {
       const disruption = firstInterruption.impactZones[0];
+      
+      // Ensure there are some realistic extra costs/time from the interruption
+      route.extraCostFromDisruptions = Math.max(route.extraCostFromDisruptions || 0, 1500);
+      route.extraTimeHours = Math.max(route.extraTimeHours || 0, 72);
+
       // Find the last itinerary hub BEFORE the disruption
       const allPoints = firstInterruption.points || [];
       const firstPt = allPoints[0] || {};
@@ -687,49 +692,48 @@ function enforceCrossRouteConsistency(routes) {
 
   if (!r1 || !r2 || !r3 || !r4) return routes;
 
-  // 1. HARD CONSTRAINTS (Price Gaps)
-  // r3 (1-stop air) MUST be 5-20% cheaper than r1
-  if (r3.totalCost > r1.totalCost * 0.95 || r3.totalCost < r1.totalCost * 0.80) {
-    r3.totalCost = Math.round(r1.totalCost * 0.90);
+  // 1. DYNAMIC MINIMA (Prevent illogical pricing)
+  // r3 (1-stop air) is usually slightly cheaper than r1 due to relay efficiency
+  if (r3.totalCost >= r1.totalCost) {
+    r3.totalCost = Math.round(r1.totalCost * 0.92);
   }
   
-  // r4 (Multimodal) MUST be 15-40% cheaper than r1 AND cheaper than r3
-  if (r4.totalCost > r1.totalCost * 0.85 || r4.totalCost < r1.totalCost * 0.60 || r4.totalCost >= r3.totalCost) {
-    // 25% cheaper than r1, and strictly cheaper than r3
-    r4.totalCost = Math.min(Math.round(r1.totalCost * 0.75), r3.totalCost - 50);
+  // r4 (Multimodal) should be significantly cheaper than air
+  if (r4.totalCost >= r3.totalCost * 0.9) {
+    r4.totalCost = Math.round(r3.totalCost * 0.75);
   }
 
-  // r2 (Sea) MUST be 50-80% cheaper than r1 AND cheaper than r4
-  if (r2.totalCost > r1.totalCost * 0.50 || r2.totalCost < r1.totalCost * 0.20 || r2.totalCost >= r4.totalCost) {
-    r2.totalCost = Math.min(Math.round(r1.totalCost * 0.35), r4.totalCost - 50);
+  // r2 (Sea) is the baseline floor
+  if (r2.totalCost >= r4.totalCost * 0.8) {
+    r2.totalCost = Math.round(r4.totalCost * 0.45);
   }
 
   // 2. HARD CONSTRAINTS (Time Gaps)
-  // r1 < r3 < r4 < r2
+  // Ensure a logical progression: r1 < r3 < r4 < r2
   if (r3.totalTimeDays <= r1.totalTimeDays) r3.totalTimeDays = r1.totalTimeDays + 1;
-  if (r4.totalTimeDays <= r3.totalTimeDays) r4.totalTimeDays = r3.totalTimeDays + Math.max(3, Math.round(r3.totalTimeDays * 0.8));
-  if (r2.totalTimeDays <= r4.totalTimeDays) r2.totalTimeDays = r4.totalTimeDays + Math.max(5, Math.round(r4.totalTimeDays * 1.5));
+  if (r4.totalTimeDays <= r3.totalTimeDays) r4.totalTimeDays = r3.totalTimeDays + Math.max(3, Math.round(r3.totalTimeDays * 0.6));
+  if (r2.totalTimeDays <= r4.totalTimeDays) r2.totalTimeDays = r4.totalTimeDays + Math.max(5, Math.round(r4.totalTimeDays * 1.2));
 
-  // 3. SYNC BREAKDOWNS & LABELS
+  // 3. SYNC BREAKDOWNS (Redistribute costs proportionally to match the totalCost target)
   routes.forEach(r => {
     const currentSum = (r.cost.freight || 0) + (r.cost.fuel || 0) + (r.cost.handling || 0) + (r.cost.customs || 0) + (r.cost.extraCostFromDisruptions || 0);
-    if (currentSum !== r.totalCost) {
-      const delta = r.totalCost - currentSum;
-      r.cost.freight = Math.round((r.cost.freight || 0) + (delta * 0.85));
-      r.cost.fuel = Math.round((r.cost.fuel || 0) + (delta * 0.15));
+    if (currentSum !== r.totalCost && currentSum !== 0) {
+      const scalar = r.totalCost / currentSum;
+      r.cost.freight = Math.round((r.cost.freight || 0) * scalar);
+      r.cost.fuel = Math.round((r.cost.fuel || 0) * scalar);
+      r.cost.handling = Math.round((r.cost.handling || 0) * scalar);
+      r.cost.customs = Math.round((r.cost.customs || 0) * scalar);
+      r.cost.extraCostFromDisruptions = Math.round((r.cost.extraCostFromDisruptions || 0) * scalar);
+      
       const finalSum = (r.cost.freight || 0) + (r.cost.fuel || 0) + (r.cost.handling || 0) + (r.cost.customs || 0) + (r.cost.extraCostFromDisruptions || 0);
       if (finalSum !== r.totalCost) r.cost.freight += (r.totalCost - finalSum);
     }
-    r.cost.total = r.totalCost; // CRITICAL: Sync back to technical cost for UI mapping
-    if (r.financials) {
-      r.financials.finalCost = r.totalCost;
-    }
-    r.totalTime = r.totalTimeDays; // Sync for UI
+    r.cost.total = r.totalCost;
+    if (r.financials) r.financials.finalCost = r.totalCost;
+    r.totalTime = r.totalTimeDays;
   });
-
-  // 4. SORT BEFORE OUTPUT
-  routes.sort((a, b) => b.totalCost - a.totalCost);
   
+  routes.sort((a, b) => b.totalCost - a.totalCost);
   return routes;
 }
 
